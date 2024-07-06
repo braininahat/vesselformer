@@ -3,27 +3,33 @@
 """
 
 import json
-
-import yaml
-from numpy.core.arrayprint import dtype_is_implied
-import torch
 import math
-import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
-from monai.data import Dataset
-import torchvision.transforms.functional as tvf
-from torchvision import transforms
-from medpy.io import load
-import pyvista
-import numpy as np
-import random
 import os
+import random
+
+import numpy as np
+import pyvista
+import torch
+import torch.nn.functional as F
+import yaml
+from medpy.io import load
+from monai.data import Dataset
+from numpy.core.arrayprint import dtype_is_implied
 from scipy import ndimage
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
+from torch.nn.utils.rnn import pad_sequence
+from torchvision import transforms
+from tqdm import tqdm
 
-# from skimage.morphology import skeletonize_3d
-# import itertools
+from augmentations.transform_volume_3d import (
+    Flip,
+    RandomlySelectTransform,
+    RandomOrder,
+    Rotate90,
+)
+
+tvf = transforms.functional
 
 # train_transform = Compose(
 #     [
@@ -32,14 +38,10 @@ from scipy.sparse.csgraph import connected_components
 #         ToTensor,
 #     ]
 # )
-from tqdm import tqdm
 
-from augmentations.transform_volume_3d import (
-    RandomOrder,
-    Rotate90,
-    Flip,
-    RandomlySelectTransform,
-)
+# from skimage.morphology import skeletonize_3d
+# import itertools
+
 
 train_transform = []
 # val_transform = Compose(

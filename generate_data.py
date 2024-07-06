@@ -1,10 +1,15 @@
 import math
-from tqdm import tqdm
-from medpy.io import load, save
-import pyvista
-import numpy as np
 import os
+from glob import glob
+from pprint import pprint
+
+import numpy as np
+import pyvista
+from medpy.io import load, save
+from natsort import natsorted
 from scipy.sparse import csr_matrix
+from tqdm import tqdm
+from multiprocessing import Pool
 
 patch_size = [64, 64, 64]
 pad = [5, 5, 5]
@@ -98,7 +103,7 @@ def save_input(save_path, idx, patch, patch_seg, patch_coord, patch_edge, patch_
     mesh_structured.save(save_path + "vtp/sample_" + str(idx).zfill(6) + "_graph.vtp")
 
 
-def patch_extract(save_path, image, seg, mesh, device=None):
+def patch_extract(save_path, image, seg, mesh, image_id=None, device=None):
     """[summary]
 
     Args:
@@ -111,7 +116,7 @@ def patch_extract(save_path, image, seg, mesh, device=None):
     Returns:
         [type]: [description]
     """
-    global image_id
+
     # TODO: edge on the boundary of patch not included, edge which passes through the volume not included
     p_h, p_w, p_d = patch_size
     pad_h, pad_w, pad_d = pad
@@ -234,7 +239,7 @@ def patch_extract(save_path, image, seg, mesh, device=None):
                     patch_edge,
                     patch_attr,
                 )
-                image_id = image_id + 1
+
                 # print('Image No', image_id)
 
 
@@ -328,7 +333,7 @@ def prune_patch(patch_coord_list, patch_edge_list, patch_attribute_dict_list):
 
         # straighten the graph by removing redundant nodes
         start = True
-        node_mask = np.ones(coord.shape[0], dtype=np.bool)
+        node_mask = np.ones(coord.shape[0], dtype=bool)
         while start:
             degree = (dist_adj > 0).sum(1)
             deg_2 = list(np.where(degree == 2)[0])
@@ -387,6 +392,40 @@ def prune_patch(patch_coord_list, patch_edge_list, patch_attribute_dict_list):
     return mod_patch_coord_list, mod_patch_edge_list, mod_patch_attr_list
 
 
+def process_triplet(idx, triplet):
+    print(f"Processing {idx}")
+    raw_file, seg_file, vtk_file = triplet
+
+    if idx >= 40:
+        split_name = "test"
+    else:
+        split_name = "train"
+    image_data, _ = load(raw_file)
+    image_data = np.int32(image_data)
+    seg_data, _ = load(seg_file)
+    seg_data = np.int8(seg_data)
+    vtk_data = pyvista.read(vtk_file)
+
+    # correction of shift in the data
+    shift = [
+        np.shape(image_data)[0] / 2 - 1.8,
+        np.shape(image_data)[1] / 2 + 8.3,
+        4.0,
+    ]
+    coordinates = np.float32(np.asarray(vtk_data.points / 3.0 + shift))
+
+    vtk_data.points = coordinates
+
+    patch_extract(
+        f"data/vessel_data/{split_name}_data/",
+        image_data,
+        seg_data,
+        vtk_data,
+        image_id=idx,
+    )
+    return True
+
+
 if __name__ == "__main__":
     DATA_PATH = "data/vessel_data"
 
@@ -394,75 +433,26 @@ if __name__ == "__main__":
     seg_folder = os.path.join(DATA_PATH, "seg")
     vtk_folder = os.path.join(DATA_PATH, "vtk")
 
-    raw_files = []
-    seg_files = []
-    vtk_files = []
+    raw_files = natsorted(glob(img_folder + "/*.nii.gz"))
+    seg_files = natsorted(glob(seg_folder + "/*.nii.gz"))
+    vtk_files = natsorted(glob(vtk_folder + "/*/*.vtk"))
 
-    for file_ in os.listdir(seg_folder):
-        file_ = file_[:-7]
-        raw_files.append(os.path.join(img_folder, str(file_) + ".nii.gz"))
-        seg_files.append(os.path.join(seg_folder, str(file_) + ".nii.gz"))
-        vtk_files.append(os.path.join(vtk_folder, str(file_) + ".vtk"))
+    triplets = list(zip(raw_files, seg_files, vtk_files))
 
-    image_id = 1
-    train_path = "data/vessel_data/train_data/"
-    if not os.path.isdir(train_path):
-        os.makedirs(train_path)
-        os.makedirs(train_path + "/seg")
-        os.makedirs(train_path + "/vtp")
-        os.makedirs(train_path + "/raw")
-    # else:
-    #     raise Exception("Train folder is non-empty")
-    print("Preparing Train Data", seg_files[:40])
-    for idx, seg_file in tqdm(enumerate(seg_files[:40])):
-        image_data, _ = load(raw_files[idx])
-        image_data = np.int32(image_data)
-        seg_data, _ = load(seg_files[idx])
-        seg_data = np.int8(seg_data)
-        vtk_data = pyvista.read(vtk_files[idx])
+    split_names = ["train", "test"]
+    for prefix in [
+        f"data/vessel_data/{split_name}_data/" for split_name in split_names
+    ]:
+        if not os.path.isdir(prefix):
+            os.makedirs(prefix + "/seg")
+            os.makedirs(prefix + "/vtp")
+            os.makedirs(prefix + "/raw")
 
-        # correction of shift in the data
-        shift = [
-            np.shape(image_data)[0] / 2 - 1.8,
-            np.shape(image_data)[1] / 2 + 8.3,
-            4.0,
-        ]
-        coordinates = np.float32(np.asarray(vtk_data.points / 3.0 + shift))
-        # lines = np.asarray(vtk_data.lines.reshape(vtk_data.n_cells, 3))
-
-        vtk_data.points = coordinates
-
-        # if self.transform:
-        patch_extract(train_path, image_data, seg_data, vtk_data)
-
-    image_id = 1
-    test_path = "data/vessel_data/test_data/"
-    if not os.path.isdir(test_path):
-        os.makedirs(test_path)
-        os.makedirs(test_path + "/seg")
-        os.makedirs(test_path + "/vtp")
-        os.makedirs(test_path + "/raw")
-    # else:
-    #     raise Exception("Test folder is non-empty")
-
-    print("Preparing Test Data", seg_files)
-    for idx, seg_file in tqdm(enumerate(seg_files)):
-        image_data, _ = load(raw_files[idx])
-        image_data = np.int32(image_data)
-        seg_data, _ = load(seg_files[idx])
-        seg_data = np.int8(seg_data)
-        vtk_data = pyvista.read(vtk_files[idx])
-
-        # correction of shift in the data
-        shift = [
-            np.shape(image_data)[0] / 2 - 1.8,
-            np.shape(image_data)[1] / 2 + 8.3,
-            4.0,
-        ]
-        coordinates = np.float32(np.asarray(vtk_data.points / 3.0 + shift))
-        # lines = np.asarray(vtk_data.lines.reshape(vtk_data.n_cells, 3))
-
-        vtk_data.points = coordinates
-
-        # if self.transform:
-        patch_extract(test_path, image_data, seg_data, vtk_data)
+    with Pool(os.cpu_count()) as p:
+        res = list(
+            tqdm(
+                p.starmap(process_triplet, enumerate(triplets)),
+                total=len(triplets),
+                position=0,
+            )
+        )
