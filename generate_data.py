@@ -396,7 +396,7 @@ def process_triplet(idx, triplet):
     print(f"Processing {idx}")
     raw_file, seg_file, vtk_file = triplet
 
-    if idx >= 40:
+    if idx >= 96:
         split_name = "test"
     else:
         split_name = "train"

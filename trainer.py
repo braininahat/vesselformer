@@ -1,3 +1,5 @@
+import gc
+import os
 from typing import (
     TYPE_CHECKING,
     Callable,
@@ -11,10 +13,8 @@ from typing import (
 )
 
 import torch
-from torch.optim.optimizer import Optimizer
-from torch.utils.data import DataLoader
-
 from monai.config import IgniteInfo
+from monai.engines import SupervisedTrainer
 from monai.engines.utils import (
     GanKeys,
     IterationEvents,
@@ -22,30 +22,24 @@ from monai.engines.utils import (
     default_metric_cmp_fn,
     default_prepare_batch,
 )
-from monai.inferers import Inferer, SimpleInferer
-from monai.transforms import Transform
-from monai.utils import min_version, optional_import
-from monai.utils.enums import CommonKeys as Keys
-
-import os
-from torch.nn.functional import interpolate
-from monai.engines import SupervisedTrainer
 from monai.handlers import (
+    CheckpointSaver,
     LrScheduleHandler,
-    ValidationHandler,
+    MeanDice,
     StatsHandler,
     TensorBoardStatsHandler,
-    CheckpointSaver,
-    MeanDice,
+    ValidationHandler,
 )
-from monai.transforms import (
-    Compose,
-    AsDiscreted,
-)
-import torch
+from monai.inferers import Inferer, SimpleInferer
+from monai.transforms import AsDiscreted, Compose, Transform
+from monai.utils import min_version, optional_import
+from monai.utils.enums import CommonKeys as Keys
+from torch.nn.functional import interpolate
 from torch.nn.utils import clip_grad_norm
-from inference import relation_matcher
-import gc
+from torch.optim.optimizer import Optimizer
+from torch.utils.data import DataLoader
+
+from inference import relation_infer
 
 if TYPE_CHECKING:
     from ignite.engine import Engine, EventEnum

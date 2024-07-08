@@ -1,18 +1,20 @@
 import json
+import logging
+import pdb
+from itertools import product
 
+import numpy as np
+import pyvista
 import torch
 import torch.nn.functional as F
-import numpy as np
-import logging
-from mmcv.utils import get_logger
-import pyvista
-
-# from skimage.measure import marching_cubes_lewiner
-from scipy.ndimage.morphology import grey_dilation
-from generate_data import prune_patch
 from scipy import ndimage
-from itertools import product
-import pdb
+from scipy.ndimage.morphology import grey_dilation
+
+# from skimage.measure import marching_cubes
+
+from generate_data import prune_patch
+
+# from mmcv.utils import get_logger
 
 
 def image_graph_collate(batch):

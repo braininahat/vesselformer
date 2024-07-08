@@ -1,22 +1,28 @@
 import os
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-import yaml
 import json
 from argparse import ArgumentParser
+from datetime import datetime
 from shutil import copyfile
+
+import ignite
+import ignite.distributed as ignite
 import torch
-from dataset_vessel3d import build_vessel_data
-from evaluator import build_evaluator
-from trainer import build_trainer
-from models import build_model
-from utils import image_graph_collate
-from models.matcher import build_matcher
-from losses import SetCriterion
 import torch.distributed as dist
-import ignite.distributed as igdist
+import yaml
 from ignite.contrib.handlers.tqdm_logger import ProgressBar
 from torch.utils.tensorboard import SummaryWriter
+
+from dataset_vessel3d import build_vessel_data
+from evaluator import build_evaluator
+from losses import SetCriterion
+from models import build_model
+from models.matcher import build_matcher
+from trainer import build_trainer
+from utils import image_graph_collate
+
+TIMESTAMP = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 parser = ArgumentParser()
 parser.add_argument(
@@ -65,7 +71,7 @@ def main(rank, args):
     exp_path = os.path.join(
         config.TRAIN.SAVE_PATH,
         "runs",
-        "%s_%d" % (config.log.exp_name, config.DATA.SEED),
+        f"{config.log.exp_name}_{config.DATA.SEED}_{TIMESTAMP}",
     )
     if os.path.exists(exp_path) and args.resume == None:
         print("ERROR: Experiment folder exist, please change exp name in config file")
@@ -87,7 +93,7 @@ def main(rank, args):
         args.gpu = int(
             os.environ["LOCAL_RANK"]
         )  # args.gpu = 'cuda:%d' % args.local_rank
-        args.world_size = int(os.environ["WORLD_SIZE"])  # igdist.get_world_size()
+        args.world_size = int(os.environ["WORLD_SIZE"])  # ignite.get_world_size()
         print(
             "Running Distributed:",
             args.distributed,
@@ -97,21 +103,19 @@ def main(rank, args):
             args.rank,
         )
 
-    if igdist.get_local_rank() > 0:
-        # Ensure that only local rank 0 download the dataset
-        # Thus each node will download a copy of the dataset
-        igdist.barrier()
+    # if ignite.get_local_rank() > 0:
+    #     # Ensure that only local rank 0 download the dataset
+    #     # Thus each node will download a copy of the dataset
+    #     ignite.barrier()
 
-    train_ds, val_ds = build_vessel_data(
-        config,
-        mode="split",
-    )
+    train_ds = build_vessel_data(config, mode="train")
+    val_ds = build_vessel_data(config, mode="test")
 
-    if igdist.get_local_rank() == 0:
-        # Ensure that only local rank 0 download the dataset
-        igdist.barrier()
+    # if ignite.get_local_rank() == 0:
+    #     # Ensure that only local rank 0 download the dataset
+    #     ignite.barrier()
 
-    train_loader = igdist.auto_dataloader(
+    train_loader = ignite.auto_dataloader(
         train_ds,
         batch_size=config.DATA.BATCH_SIZE,
         shuffle=True,
@@ -121,7 +125,7 @@ def main(rank, args):
         drop_last=True,
     )  # To allow using different batch sizes
 
-    val_loader = igdist.auto_dataloader(
+    val_loader = ignite.auto_dataloader(
         val_ds,
         batch_size=config.DATA.BATCH_SIZE,
         shuffle=False,
@@ -133,11 +137,15 @@ def main(rank, args):
         drop_last=True,
     )  # To allow using different batch sizes)
 
+    print("Train dataset length:", len(train_ds))
+    print("Val dataset length:", len(val_ds))
+    
+
     device = torch.device(args.device)
     if args.distributed:
         torch.cuda.set_device(args.gpu)
         # dist.init_process_group(backend='nccl', init_method='env://', world_size=args.world_size, rank=args.rank)
-        args.rank = igdist.get_rank()
+        # args.rank = ignite.get_rank()
         device = torch.device(f"cuda:{args.rank}")
 
     net = build_model(config)
@@ -167,9 +175,9 @@ def main(rank, args):
     relation_embed = net.relation_embed.to(device)
     radius_embed = net.radius_embed.to(device)
 
-    net = igdist.auto_model(net)
-    relation_embed = igdist.auto_model(relation_embed)
-    radius_embed = igdist.auto_model(radius_embed)
+    net = ignite.auto_model(net)
+    relation_embed = ignite.auto_model(relation_embed)
+    radius_embed = ignite.auto_model(radius_embed)
 
     if args.distributed:
         net_wo_dist = net.module
@@ -182,7 +190,7 @@ def main(rank, args):
         lr=float(config.TRAIN.BASE_LR),
         weight_decay=float(config.TRAIN.WEIGHT_DECAY),
     )
-    optimizer = igdist.auto_optim(optimizer)
+    optimizer = ignite.auto_optim(optimizer)
 
     # LR schedular
     iter_per_epoch = len(train_loader)
@@ -192,15 +200,18 @@ def main(rank, args):
     num_warmup_iter = num_warmup_epoch * iter_per_epoch
     num_after_warmup_iter = config.TRAIN.EPOCHS * iter_per_epoch
 
-    def lr_lambda_polynomial(iter: int):
+    def lr_lambda_polynomial(iter: int, max_epochs: int = config.TRAIN.EPOCHS):
+        total_iters = (num_warmup_epoch + max_epochs) * iter_per_epoch
+        if iter >= total_iters:
+            return 0.0  # or some minimum learning rate
+
         if iter < num_warmup_epoch * iter_per_epoch:
             lr_lamda0 = warm_lr_init / warm_lr_final
             return lr_lamda0 + (1 - lr_lamda0) * iter / num_warmup_iter
         else:
-            # The total number of epochs is num_warmup_epoch + max_epochs
-            return (1 - (iter - num_warmup_iter) / num_after_warmup_iter) ** 0.9
+            return max(0, (1 - (iter - num_warmup_iter) / num_after_warmup_iter) ** 0.9)
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda_polynomial)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu")
@@ -241,15 +252,16 @@ def main(rank, args):
         args.rank,
         # fp16=args.fp16,
     )
+    print(f"Len train loader dataset: {len(trainer.data_loader.dataset)}")
 
     if args.resume:
         last_epoch = int(scheduler.last_epoch / trainer.state.epoch_length)
         evaluator.state.epoch = last_epoch
         trainer.state.epoch = last_epoch
         trainer.state.iteration = trainer.state.epoch_length * last_epoch
-    if dist.get_rank() == 0:
-        pbar = ProgressBar()
-        pbar.attach(trainer, output_transform=lambda x: {"loss": x["loss"]["total"]})
+    # if dist.get_rank() == 0:
+    pbar = ProgressBar()
+    pbar.attach(trainer, output_transform=lambda x: {"loss": x["loss"]["total"]})
     # logging.basicConfig(stream=sys.stdout, level=logging.INFO)
     trainer.run()
 
@@ -260,9 +272,10 @@ if __name__ == "__main__":
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
             map(str, args.cuda_visible_device)
         )
-    # The default value of master_port is 2222.
-    # Change it in case we want to run multiple processes on the same node.
-    with igdist.Parallel(
-        backend="nccl", nproc_per_node=args.nproc_per_node, master_port=args.master_port
-    ) as parallel:
-        parallel.run(main, args)
+    # # The default value of master_port is 2222.
+    # # Change it in case we want to run multiple processes on the same node.
+    # with ignite.Parallel(
+    #     backend="nccl", nproc_per_node=args.nproc_per_node, master_port=args.master_port
+    # ) as parallel:
+    #     parallel.run(main, args)
+    main(0, args)
